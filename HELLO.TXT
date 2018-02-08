@@ -1,0 +1,220 @@
+      _    _    ___   __     __  _____ ___ ___ _      _     _         _       
+     | |_ | |_ ( _ ) / /    / / |_   _| __/ __| |    /_\   | |   __ _| |__ ___
+     | ' \| ' \/ _ \/ _ \  / /    | | | _|\__ \ |__ / _ \  | |__/ _` | '_ (_-<
+     |_||_|_||_\___/\___/ /_/     |_| |___|___/____/_/ \_\ |____\__,_|_.__/__/
+
+                                                                   presents...
+       .*.
+     *' + '*      ,       ,
+      *'|'*       |`;`;`;`|
+        |         |:.'.'.'|
+        |         |:.:.:.:|
+        |         |::....:|
+        |        /`   / ` \
+        |       (   .' ^ \^)
+        |_.,   (    \    -/(
+     ,~`|   `~./     )._=/  )  ,,
+    {   |     (       )|   (.~`  `~,
+    {   |      \   _.'  \   )       }
+    ;   |       ;`\      `)-`       }     _.._
+     '.(\,     ;   `\    / `.       }__.-'__.-'Triple Hello World in assembly:
+      ( (/-;~~`;     `\_/    ;   .'`  _.-'        Cross-platform Sandwich Code
+      `/|\/   .'\.    /o\   ,`~~`~~~~`
+       \| ` .'   \'--'   '-`
+        |--',==~~`)       (`~~==,_
+  jgs   ,=~`      `-.     /       `~=,
+     ,=`             `-._/            `=,
+
+
+                                                                    04/02/2018
+                                                           fsendjinn@gmail.com
+
+What is it?
+
+Years ago I read an older article about using INT3 as an anti-something trick,
+I had seen it used in some virus sources and I thought it was something that I
+could use as well.   I thought, what if we use INT3 instead of CALL to call an
+API and make the call from an exception handler instead? Oh well, I was unable
+to make it work then.  But what if I can now? ;)
+
+        call    set_seh
+        ;handler would go here
+set_seh:
+        xor     eax, eax
+        fs push dword [eax]
+        fs mov  dword [eax], esp
+
+Now remember this idea was originally intended for a virus code.   When I get
+the address of an API,  I push  it to the stack instead of explicitly writing
+it to some memory buffer. Now pretend we have some API addresses in the stack
+and push all parameters:
+
+        push    ExitProcess
+        push    WriteFile
+        mov     edi, esp
+        push    eax
+        push    esp
+        push    len
+        call    skip_msg
+msg:
+        db      "Hello World!"
+len equ $-msg                                ;in true Hello World fashion :)
+
+skip_msg:
+        push    -0bh                         ;STD_OUTPUT_HANDLE
+
+We need to tell our code in the exception handler,  how many parameters are in
+the stack, and the offset of the API we want to call.   In this case WriteFile
+is at 0, and we have 5 dwords in the stack:
+
+        mov     eax, (0 << 8) + 20           ;AH = API offset, AL=stack size
+        int     3                            ;just taking a break ;)
+        push    0
+        call    dword [edi + 4]              ;normal API call to ExitProcess
+
+The problem years before was about how can we make the call, if the parameters
+are "left behind." The solution is simple, we copy the parameters to our stack
+and make the call. :)
+
+The exception handler looks like this:
+
+handler:
+        pop     edx                                        ;pop return address
+        pop     eax                                        ;pop ExceptionRecord address
+        push    edx                                        ;push it back
+        cmp     dword [eax], 080000003h                    ;check if ExceptionCode is a breakpoint exception
+        jne     leave_seh                                  ;another kind of exception occurred, uninstall exception handler
+        pushad
+        mov     ebp, esp                                   ;save ESP to restore it later (undo the buffer for the parameters)
+        mov     ebx, dword [ebp + 20h + ContextRecord - 4] ;get ContextRecord
+        mov     eax, dword [ebx + ContextEax]              ;get API offset and stack size
+        movzx   ecx, al                                    ;mov ecx for REP
+        sub     esp, ecx                                   ;make a buffer to copy the parameters
+        mov     edi, esp
+        mov     esi, dword [ebx + ContextEsp]
+        add     dword [ebx + ContextEsp], ecx              ;clean up stack
+        rep     movsb                                      ;copy parameters to our stack
+        mov     cl, ah                                     ;after REP ecx is 0, make it the API offset
+        mov     eax, dword [ebx + ContextEdi]              ;get platform APIs address
+        call    dword [eax + ecx]                          ;call the API
+        mov     dword [ebx + ContextEax], eax              ;store result in eax
+        inc     dword [ebx + ContextEip]                   ;skip int 3 instruction
+        mov     esp, ebp                                   ;restore our ESP
+        popad
+        xor     eax, eax                                   ;continue execution
+        ret
+
+And it is done.  The handler preserves all registers except EAX and ESP.  That
+is nice because you don't need to save them.    However, nowadays nothing gets
+fooled by INT3.  For us, it is small and it works, and that is enough. :)  But
+there are plenty of ways to can cause exceptions, even using other interrupts.
+
+
+                                                   ___  _ _   _               
+                                                  / __\(_) |_(_)_______ _ __  
+                                                 / /   | | __| |_  / _ \ '_ \ 
+                                                / /___ | | |_| |/ /  __/ | | |
+                                                \____/ |_|\__|_/___\___|_| |_|
+                                                                  of the world
+
+It is funny this idea came back at this time after finishing my cross-platform
+project  BeautifulSky.   In Windows we normally use CALL to call APIs,  but if
+BeautifulSky had been written for Linux, I thought, I would have probably used
+INT80h. So, what can possibly bridge all this together?
+
+Instead of using INT3, I could use INT80h.  Sure enough it causes an exception
+in Windows that we can use.  So, using this I can support other platforms with
+a common interface! Linux and OSX use INT80h as a system service call and both
+share some of those functions, for example, sys_write to write to a Terminal.
+
+However, in Windows WriteFile is not compatible with sys_write,  so we need to
+find it somewhere else. I chose the C Runtime msvcrt.dll because it is easy to
+load and it ships with Windows,  from  it  we need to resolve the addresses of
+_write and _exit. This means that we will have a lot of code that needs to run
+in Windows, and we need a special entrypoint for it.   But we can use a common
+entrypoint for Linux and OSX code.
+
+The new exception handler looks like this:
+
+        pop     edx
+        pop     eax
+        push    edx
+        mov     eax, dword [eax + ExceptionAddress]
+        mov     eax, dword [eax]
+        cmp     ax, 80cdh                    ;int 80h
+        jne     leave_seh
+        pushad
+        mov     ebp, esp
+        mov     ebx, dword [esp + 20h + ContextRecord - 4]
+        add     ebx, 7fh
+        mov     esi, dword [ebx + ContextEsp - 7fh]
+        lodsd                                ;pop first dword, this eliminates the alignment dword for OSX calls
+        mov     eax, 1986h                   ;store here the address of the functions in the stack
+
+store_ssoff:                                 ;for patch use "reg - 4"
+        movzx   ecx, al
+        sub     esp, ecx
+        mov     edi, esp
+        rep     movsb
+        mov     cl, ah
+
+store_apistk:
+        call    dword [ecx + 1986h]
+        add     dword [ebx + ContextEip - 7fh], 2  ;skip int 80h
+        mov     dword [ebx + ContextEax - 7fh], eax
+        mov     esp, ebp
+        popad
+        xor     eax, eax
+        ret
+
+Now this is the code to make the calls, begins after msvcrt APIs are resolved:
+
+copy_esp:
+        lea     edi, dword [esi - (copy_esp - store_ssoff)]
+                                             ;switch to edi because in Linux
+                                             ;it is the last register to be used
+                                             ;for params in calls, so fewer saves
+        mov     dword [edi + (store_apistk - store_ssoff) + 2], esp
+                                             ;store platform APIs
+        jmp     skip_main2
+
+        ;here begins the common entrypoint for Linux and OSX
+
+_main2:
+        mov     edi, esp
+        push    eax
+        push    eax
+
+skip_main2:
+        call    skip_msg
+msg:
+        db      "Hello World! (TripleHigh by hh86)", 0ah
+len equ $-msg                                ;in true Hello World fashion :)
+
+skip_msg:
+        pop     ecx
+        push    len
+        pop     edx
+        push    1                            ;stdout
+        pop     ebx
+        push    edx
+        push    ecx
+        push    ebx
+        push    4                            ;sys_write
+        pop     eax
+        mov     word [edi - 4], (crtcrcstk.write << 8) + 0ch
+        push    eax                          ;align needed for OSX 
+                                             ;in Windows this needs to be adjusted
+        int     80h
+        
+        ;you can clean up the stack here if you want, e.g add esp, 10h
+
+        mov     eax, ebx                     ;sys_exit
+        dec     ebx
+        push    ebx
+        mov     word [edi - 4], (crtcrcstk.exit << 8) + 4
+        push    eax                          ;align needed for OSX 
+                                             ;in Windows this needs to be adjusted
+        int     80h                          ;once only imagined
+
+And that's all. :)
